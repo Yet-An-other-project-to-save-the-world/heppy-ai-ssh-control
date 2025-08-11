@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # -------------------------------------------------
-#   ssh_writer.sh – dynamic secure file operations
+#   heppy-ai-ssh-wrapper.sh – dynamic secure file operations
 # -------------------------------------------------
 
-VERSION="1.0.0"
+VERSION="1.0.2"
 
 CONFIG_DIR="$HOME/.config/heppy_ai"
 CONFIG_FILE="$CONFIG_DIR/auth.conf"
@@ -53,26 +53,6 @@ validate_write_path() {
 
 validate_read_path() {
     local path="$1"
-    if [[ "$path" != /* ]]; then
-        for root in "${ALL_SEARCH_PATHS[@]}"; do
-            if [ -e "${root%/}/$path" ]; then
-                return 0
-            fi
-        done
-    else
-        path="$(realpath -m "$path" 2>/dev/null || echo "$path")"
-        for root in "${ALL_SEARCH_PATHS[@]}"; do
-            if [[ "$path" == "$root"* ]]; then
-                return 0
-            fi
-        done
-    fi
-    echo "ERROR: Path violation - $path" >&2
-    return 1
-}
-
-validate_read_path() {
-    local path="$1"
 
     # Reject hidden files and dirs
     if [[ "$(basename "$path")" == .* ]] || [[ "$path" == */.* ]]; then
@@ -101,41 +81,39 @@ validate_read_path() {
     return 1
 }
 
-
 # -------------------------------------------------
-# Old Command Functions
+# Command Functions
 # -------------------------------------------------
 run_command() {
     local cmd="$1"
     shift
     case "$cmd" in
-find_files)
-    for root in "${ALL_SEARCH_PATHS[@]}"; do
-        if [ $# -eq 0 ]; then
-            # List all files excluding hidden dirs and hidden files
-            find "$root" \
-                -type d -name '.*' -prune -o \
-                -type f ! -name '.*' -print
-        else
-            # Find all files excluding hidden dirs and files first
-            files=$(find "$root" \
-                -type d -name '.*' -prune -o \
-                -type f ! -name '.*' -print)
+        find_files)
+            for root in "${ALL_SEARCH_PATHS[@]}"; do
+                if [ $# -eq 0 ]; then
+                    # List all files excluding hidden dirs and hidden files
+                    find "$root" \
+                        -type d -name '.*' -prune -o \
+                        -type f ! -name '.*' -print
+                else
+                    # Find all files excluding hidden dirs and files first
+                    files=$(find "$root" \
+                        -type d -name '.*' -prune -o \
+                        -type f ! -name '.*' -print)
 
-            # Filter files that contain all patterns (case-insensitive)
-            # Using a loop to narrow down
-            filtered="$files"
-            for pat in "$@"; do
-                filtered=$(echo "$filtered" | grep -iF -- "$pat" || true)
+                    # Filter files that contain all patterns (case-insensitive)
+                    # Using a loop to narrow down
+                    filtered="$files"
+                    for pat in "$@"; do
+                        filtered=$(echo "$filtered" | grep -iF -- "$pat" || true)
+                    done
+
+                    echo "$filtered"
+                fi
             done
-
-            echo "$filtered"
-        fi
-    done
-    ;;
-
+            ;;
         token_check)
-           echo OK
+            echo OK
             ;;
         read_file)
             path="${1:-}"
@@ -176,6 +154,106 @@ find_files)
                     break
                 fi
             done
+            ;;
+        git_pull)
+            [ $# -ne 1 ] && { echo "ERROR: Usage: git_pull <repo_url>"; exit 1; }
+            local repo_url="$1"
+            local base_dir="${WRITE_PATHS[0]%/}"
+            mkdir -p "$base_dir"
+            local repo_name=$(basename "$repo_url" .git)
+            while :; do
+                local random_id=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 6)
+                local project_dir="${base_dir}/git_${repo_name}-${random_id}"
+                if [ ! -e "$project_dir" ]; then
+                    mkdir -p "$project_dir"
+                    break
+                fi
+            done
+            if ! git clone "$repo_url" "$project_dir"; then
+                echo "ERROR: Git clone failed" >&2
+                rm -rf "$project_dir"
+                exit 1
+            fi
+            echo "$project_dir"
+            ;;
+        git_post)
+            if [ $# -lt 4 ]; then
+                echo "ERROR: Usage: git_post <project_dir> <branch_name> <pr_title> <pr_body>" >&2
+                exit 1
+            fi
+            local project_dir="$1"
+            local branch_name="$2"
+            local pr_title="$3"
+            local pr_body="$4"
+
+            validate_read_path "$project_dir" || exit 1
+
+            # Change directory
+            cd "$project_dir" || { echo "ERROR: Cannot cd into $project_dir="; exit 1; }
+
+            # Create a new branch
+            git checkout -b "$branch_name" || { echo "ERROR: Failed to create branch"; exit 1; }
+
+            # Add all changes
+            git add -A
+
+            # Commit changes
+            git commit -m "$pr_title" -m "$pr_body" || { echo "ERROR: Commit failed"; exit 1; }
+
+            # Push branch
+            git push -u origin "$branch_name" || { echo "ERROR: Push failed"; exit 1; }
+
+            # Open Pull Request using gh CLI
+            if command -v gh &>/dev/null; then
+                pr_url=$(gh pr create --fill --title "$pr_title" --body "$pr_body" --base main --head "$branch_name" --repo .)
+                echo "Pull Request created: $pr_url in dir $project_dir_real"
+            else
+                echo "WARNING: GitHub CLI (gh) not found, skipping PR creation"
+                echo "Branch pushed: $branch_name"
+            fi
+            ;;
+        ai_git_post)
+            # This is the new command to support the SSH format
+            if [ $# -lt 4 ]; then
+                echo "ERROR: Usage: ai_git_post <project_dir> <branch_name> <pr_title> <pr_body>" >&2
+                exit 1
+            fi
+            local project_dir="$1"
+            local branch_name="$2"
+            local pr_title="$3"
+            local pr_body="$4"
+
+            # Validate the project_dir is inside first READ_PATH
+            local read_base="${READ_PATHS[0]%/}"
+            project_dir_real=$(realpath -m "$project_dir")
+            if [[ "$project_dir_real" != "$read_base"* ]]; then
+                echo "ERROR: project_dir is not inside allowed READ_PATH" >&2
+                exit 1
+            fi
+
+            # Change directory
+            cd "$project_dir_real" || { echo "ERROR: Cannot cd into $project_dir_real"; exit 1; }
+
+            # Create a new branch
+            git checkout -b "$branch_name" || { echo "ERROR: Failed to create branch"; exit 1; }
+
+            # Add all changes
+            git add -A
+
+            # Commit changes
+            git commit -m "$pr_title" -m "$pr_body" || { echo "ERROR: Commit failed"; exit 1; }
+
+            # Push branch
+            git push -u origin "$branch_name" || { echo "ERROR: Push failed"; exit 1; }
+
+            # Open Pull Request using gh CLI
+            if command -v gh &>/dev/null; then
+                pr_url=$(gh pr create --fill --title "$pr_title" --body "$pr_body" --base main --head "$branch_name" --repo .)
+                echo "Pull Request created: $pr_url in dir $project_dir_real"
+            else
+                echo "WARNING: GitHub CLI (gh) not found, skipping PR creation"
+                echo "Branch pushed: $branch_name"
+            fi
             ;;
         *)
             echo "ERROR: Invalid command" >&2
