@@ -400,11 +400,32 @@ run_command() {
   local cmd="$1"
   shift
   case "$cmd" in
-    find_files)
-      # Optional: implement a safe find within READ_PATHS
-      echo "ERROR: find_files not implemented" >&2
-      return 1
-      ;;
+        read_file)
+        local path="${1:-}"
+        [ -z "$path" ] && { echo "ERROR: Missing file path"; return 1; }
+      
+        local exists=0
+        [ -e "$path" ] && exists=1
+      
+        if ! validate_read_path "$path"; then
+          if [ "$exists" -eq 1 ]; then
+            echo "ERROR: File exists but security prevents reading: $path"
+          fi
+          return 1
+        fi
+      
+        [ ! -f "$path" ] && { echo "ERROR: File not found"; return 1; }
+      
+        case "$path" in
+          *.odt|*.ods|*.odp)
+            odt2txt "$path"
+            ;;
+          *)
+            cat "$path"
+            ;;
+        esac
+        ;;
+
     token_check)
       echo OK
       ;;
